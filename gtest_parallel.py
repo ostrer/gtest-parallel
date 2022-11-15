@@ -84,12 +84,12 @@ class SigintHandler(object):
     with self.__lock:
       return self.__got_sigint
 
-  def wait(self, p):
+  def wait(self, p, timeout=None):
     with self.__lock:
       if self.__got_sigint:
         p.terminate()
       self.__processes.add(p)
-    code = p.wait()
+    code = p.wait(timeout=timeout)
     with self.__lock:
       self.__processes.discard(p)
       if code in self.sigint_returncodes:
@@ -180,13 +180,14 @@ class Task(object):
   """
 
   def __init__(self, test_binary, test_name, test_command, execution_number,
-               last_execution_time, output_dir):
+               last_execution_time, output_dir, test_timeout=None):
     self.test_name = test_name
     self.output_dir = output_dir
     self.test_binary = test_binary
     self.test_command = test_command
     self.execution_number = execution_number
     self.last_execution_time = last_execution_time
+    self.test_timeout = test_timeout
 
     self.exit_code = None
     self.runtime_ms = None
@@ -236,7 +237,9 @@ class Task(object):
     with open(self.log_file, 'w') as log:
       task = subprocess.Popen(self.test_command, stdout=log, stderr=log)
       try:
-        self.exit_code = sigint_handler.wait(task)
+        self.exit_code = sigint_handler.wait(task, self.test_timeout)
+      except subprocess.TimeoutExpired:
+        task.terminate()
       except sigint_handler.ProcessWasInterrupted:
         thread.exit()
     self.runtime_ms = int(1000 * (time.time() - begin))
@@ -253,13 +256,14 @@ class TaskManager(object):
   """
 
   def __init__(self, times, logger, test_results, task_factory, times_to_retry,
-               initial_execution_number):
+               initial_execution_number, test_timeout=None):
     self.times = times
     self.logger = logger
     self.test_results = test_results
     self.task_factory = task_factory
     self.times_to_retry = times_to_retry
     self.initial_execution_number = initial_execution_number
+    self.test_timeout = test_timeout
 
     self.global_exit_code = 0
 
@@ -311,7 +315,8 @@ class TaskManager(object):
         # execution, with its own runtime, exit code and log file.
         task = self.task_factory(task.test_binary, task.test_name,
                                  task.test_command, execution_number,
-                                 task.last_execution_time, task.output_dir)
+                                 task.last_execution_time, task.output_dir,
+                                 self.test_timeout)
 
     with self.lock:
       if task.exit_code != 0:
@@ -655,7 +660,7 @@ def find_tests(binaries, additional_args, options, times):
         for execution_number in range(options.repeat):
           tasks.append(
               Task(test_binary, test_name, test_command, execution_number + 1,
-                   last_execution_time, options.output_dir))
+                   last_execution_time, options.output_dir, options.test_timeout))
 
       test_count += 1
 
@@ -665,7 +670,7 @@ def find_tests(binaries, additional_args, options, times):
 
 
 def execute_tasks(tasks, pool_size, task_manager, timeout_seconds,
-                  serialize_test_cases):
+                  test_timeout, serialize_test_cases):
   class WorkerFn(object):
     def __init__(self, tasks, running_groups):
       self.tasks = tasks
@@ -792,6 +797,10 @@ def default_options_parser():
                     default=None,
                     help='Interrupt all remaining processes after the given '
                     'time (in seconds).')
+  parser.add_option('--test_timeout',
+                    type='int',
+                    default=None,
+                    help='Interrupt individual test aftergiven time (in seconds)')
   parser.add_option('--serialize_test_cases',
                     action='store_true',
                     default=False,
@@ -865,12 +874,13 @@ def main():
   logger = FilterFormat(options.output_dir)
 
   task_manager = TaskManager(times, logger, test_results, Task,
-                             options.retry_failed, options.repeat + 1)
+                             options.retry_failed, options.repeat + 1,
+                             options.test_timeout)
 
   tasks = find_tests(binaries, additional_args, options, times)
   logger.log_tasks(len(tasks))
   execute_tasks(tasks, options.workers, task_manager, options.timeout,
-                options.serialize_test_cases)
+                options.test_timeout, options.serialize_test_cases)
 
   print_try_number = options.retry_failed > 0 or options.repeat > 1
   if task_manager.passed:
