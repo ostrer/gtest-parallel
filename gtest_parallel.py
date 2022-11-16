@@ -240,6 +240,7 @@ class Task(object):
         self.exit_code = sigint_handler.wait(task, self.test_timeout)
       except subprocess.TimeoutExpired:
         task.terminate()
+        self.exit_code = 124 # SIGTERM
       except sigint_handler.ProcessWasInterrupted:
         thread.exit()
     self.runtime_ms = int(1000 * (time.time() - begin))
